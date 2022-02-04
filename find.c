@@ -1,16 +1,17 @@
 #include <yed/plugin.h>
+#include <yed/syntax.h>
 #include <regex.h>
 
 static yed_plugin *Self;
 
-void find_handle_exec_error (const int status)
+void find_handle_exec_error (const int status, const char *pat)
 {
     switch (status) {
         case REG_ESPACE:
             yed_cerr("Out of memory!!!");
             break;
         case REG_NOMATCH:
-            yed_cprint("No matches found.");
+            yed_cprint("Pattern not found: %s", pat);
             break;
     }
 }
@@ -64,6 +65,15 @@ char* find_line_to_char_buffer() {
     return yed_get_line_text(f->buffer, f->cursor_line);
 }
 
+void find_highlight_match (char *line, regmatch_t match) {
+    static yed_syntax syn;
+    line[match.rm_eo] = '\0';
+    yed_cprint("Found match `%s'", line + match.rm_so);
+    yed_syntax_start(&syn);
+        yed_syntax_kwd(&syn, line + match.rm_so);
+    yed_syntax_end(&syn);
+}
+
 void find_in_buffer(int n_args, char **args) {
     /* 
      * No flags for right now. Flags include using extended regex, ignoring
@@ -71,11 +81,11 @@ void find_in_buffer(int n_args, char **args) {
      */
     static const int flags = 0;
     /* 
-     * The first match is always the string itself. The second and on matches
-     * are from the regex. Right now we're doing 2, not sure how this would
-     * affect global searches, i.e. 's/foo/bar/g'
+     * Right now we only have one matching buffer. For matching subexpressions
+     * we would have to pass more, but I'm not sure how to get the number of
+     * matches an expression matched.
      */
-    static const size_t nmatches = 2;
+    static const size_t nmatches = 1;
 
     regmatch_t match[nmatches];
     regex_t    regex;
@@ -101,16 +111,12 @@ void find_in_buffer(int n_args, char **args) {
 
     status = regexec(&regex, linebuff, nmatches, match, flags);
     if (status != 0) {
-        find_handle_exec_error(status);
+        find_handle_exec_error(status, args[0]);
         goto cleanup;
     }
 
-    /*
-     * TODO: Finds matches but doesn't print correctly. Matches are just
-     * offsets, but I'm doing something wrong.
-     */
-    linebuff[match[1].rm_eo + 1] = '\0';
-    yed_cprint("Found match `%s'", linebuff + match[1].rm_so);
+    for (int i = 0; i < nmatches; i++)
+        find_highlight_match(linebuff, match[i]);
 
 cleanup:
     free(linebuff);
