@@ -1,4 +1,5 @@
 #include <yed/plugin.h>
+#include <regex.h>
 
 static yed_plugin *Self;
 
