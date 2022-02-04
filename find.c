@@ -65,13 +65,31 @@ char* find_line_to_char_buffer() {
     return yed_get_line_text(f->buffer, f->cursor_line);
 }
 
-void find_highlight_match (char *line, regmatch_t match) {
-    static yed_syntax syn;
-    line[match.rm_eo] = '\0';
-    yed_cprint("Found match `%s'", line + match.rm_so);
-    yed_syntax_start(&syn);
-        yed_syntax_kwd(&syn, line + match.rm_so);
-    yed_syntax_end(&syn);
+typedef struct Match {
+    regmatch_t match;
+    int line;
+} Match;
+static Match match;
+
+void find_highlight_handler(yed_event *event) {
+    yed_frame *frame;
+
+    if (!event->frame)
+        return;
+    frame = event->frame;
+
+    if (frame != ys->active_frame || !frame->buffer)
+        return;
+
+    /*
+     * Get the global matches. If there's a match (line > 0) and the event
+     * row matches that line, highlight the match in the current frame.
+     */
+}
+
+void find_set_matches (char *line, int nmatches, regmatch_t *matches)
+{
+    /* Set the global matches */
 }
 
 void find_in_buffer(int n_args, char **args) {
@@ -115,8 +133,7 @@ void find_in_buffer(int n_args, char **args) {
         goto cleanup;
     }
 
-    for (int i = 0; i < nmatches; i++)
-        find_highlight_match(linebuff, match[i]);
+    find_set_matches(linebuff, nmatches, match);
 
 cleanup:
     free(linebuff);
@@ -125,6 +142,11 @@ cleanup:
 int yed_plugin_boot(yed_plugin *self) {
     YED_PLUG_VERSION_CHECK();
     Self = self;
+
+    yed_event_handler h;
+    h.kind = EVENT_LINE_PRE_DRAW;
+    h.fn   = find_highlight_handler;
+    yed_add_event_handler(h);
 
     yed_plugin_set_command(Self, "find", find_in_buffer);
 
