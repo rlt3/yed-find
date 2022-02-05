@@ -66,30 +66,51 @@ char* find_line_to_char_buffer() {
 }
 
 typedef struct Match {
-    regmatch_t match;
+    regmatch_t off;
     int line;
 } Match;
-static Match match;
+static Match _match;
 
 void find_highlight_handler(yed_event *event) {
+    yed_attrs *attr, search, search_cursor, *set;
     yed_frame *frame;
 
+    if (_match.line == -1 || _match.line != event->row)
+        return;
     if (!event->frame)
         return;
     frame = event->frame;
-
     if (frame != ys->active_frame || !frame->buffer)
         return;
 
-    /*
-     * Get the global matches. If there's a match (line > 0) and the event
-     * row matches that line, highlight the match in the current frame.
-     */
+    /* get the current styles for the search and search cursor */
+    search        = yed_active_style_get_search();
+    search_cursor = yed_active_style_get_search_cursor();
+
+    for (unsigned col = _match.off.rm_so; col < _match.off.rm_eo; col++) {
+        /* if cursor is within the search, use its style */
+        set = (event->row == frame->cursor_line && col == frame->cursor_col - 1)
+                    ? &search_cursor
+                    : &search;
+        /* set the search styles or just raw highlight if not styling */
+        attr = array_item(event->line_attrs, col);
+        if (ys->active_style) {
+            yed_combine_attrs(attr, set);
+        } else {
+            attr->flags ^= ATTR_INVERSE;
+        }
+    }
 }
 
 void find_set_matches (char *line, int nmatches, regmatch_t *matches)
 {
-    /* Set the global matches */
+    if (!ys->active_frame || !ys->active_frame->buffer)
+        return;
+    yed_frame *f = ys->active_frame;
+
+    /* setting just a single match right now */
+    _match.off = matches[0];
+    _match.line = f->cursor_line;
 }
 
 void find_in_buffer(int n_args, char **args) {
@@ -142,6 +163,9 @@ cleanup:
 int yed_plugin_boot(yed_plugin *self) {
     YED_PLUG_VERSION_CHECK();
     Self = self;
+
+    /* -1 for invalid match */
+    _match.line = -1;
 
     yed_event_handler h;
     h.kind = EVENT_LINE_PRE_DRAW;
