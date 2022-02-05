@@ -5,8 +5,6 @@
 #define FIND_DEFAULT_NUM_MATCHES 16
 #define FIND_DEFAULT_PATTERN_LEN 16
 
-static yed_plugin *Self;
-
 typedef struct MatchFrame {
     /* which frame this holds information for */
     yed_frame *frame;
@@ -114,7 +112,7 @@ int find_push_match (yed_frame *frame,
     return matches[0].rm_eo + 1;
 }
 
-void find_handle_comp_error (const int status) {
+static inline void find_handle_comp_error (const int status) {
     switch (status) {
         case REG_BADBR:
             yed_cerr("[FIND] Invalid curly bracket or brace usage!");
@@ -208,7 +206,7 @@ int find_search_in_buffer(yed_frame *frame) {
 void find_search_interactive_start() {
     find_pattern_clear();
 
-    ys->interactive_command = "find";
+    ys->interactive_command = "find-in-buffer";
     /* TODO: Make the cmd_prompt a yed var for this plugin */
     ys->cmd_prompt = "/";
 
@@ -313,22 +311,44 @@ void find_cursor_prev_match(int n_args, char **args) {
     }
 }
 
+void find_set_search_all_frames(int n_args, char **args) {
+}
+
+void find_set_search_prompt(int n_args, char **args) {
+}
+
 void find_unload (yed_plugin *self) {
+    yed_event_handler h;
+
     array_free(_matches);
     array_free(_pattern);
-    /* TODO: unload highlight handler */
+
+    /* remove our custom search highlighter */
+    h.kind = EVENT_LINE_PRE_DRAW;
+    h.fn   = find_highlight_matches_handler;
+    yed_delete_event_handler(h);
+
+    /* re-load the default search highlighter */
+    h.kind = EVENT_LINE_PRE_DRAW;
+    h.fn   = yed_search_line_handler;
+    yed_add_event_handler(h);
 }
 
 
 int yed_plugin_boot(yed_plugin *self) {
     YED_PLUG_VERSION_CHECK();
-    Self = self;
 
-    yed_plugin_set_unload_fn(Self, find_unload);
+    yed_plugin_set_unload_fn(self, find_unload);
     _matches = array_make_with_cap(Match, FIND_DEFAULT_NUM_MATCHES);
     _pattern = array_make_with_cap(char,  FIND_DEFAULT_PATTERN_LEN);
 
+    /* remove default search highlighter */
     yed_event_handler h;
+    h.kind = EVENT_LINE_PRE_DRAW;
+    h.fn   = yed_search_line_handler;
+    yed_delete_event_handler(h);
+
+    /* add our custom search highlighter */
     h.kind = EVENT_LINE_PRE_DRAW;
     h.fn   = find_highlight_matches_handler;
     yed_add_event_handler(h);
@@ -339,9 +359,11 @@ int yed_plugin_boot(yed_plugin *self) {
      * *any* search.
      */
 
-    yed_plugin_set_command(Self, "find", find_regex_search);
-    yed_plugin_set_command(Self, "find-cursor-next-match", find_cursor_next_match);
-    yed_plugin_set_command(Self, "find-cursor-prev-match", find_cursor_prev_match);
+    yed_plugin_set_command(self, "find-in-buffer", find_regex_search);
+    yed_plugin_set_command(self, "find-next-in-buffer", find_cursor_next_match);
+    yed_plugin_set_command(self, "find-prev-in-buffer", find_cursor_prev_match);
+    yed_plugin_set_command(self, "find-set-search-all-frames", find_set_search_all_frames);
+    yed_plugin_set_command(self, "find-set-search-prompt", find_set_search_prompt);
 
     return 0;
 }
