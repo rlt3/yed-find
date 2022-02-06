@@ -16,13 +16,13 @@ typedef struct matchframe {
      */
 } matchframe;
 
-typedef struct Match {
+typedef struct match {
     /* the line within the frame that this is a match for */
     int line;
     /* offsets in the line where the match starts and ends */
     size_t start;
     size_t end;
-} Match;
+} match;
 
 static array_t _matchframes;
 static array_t _pattern;
@@ -32,7 +32,7 @@ static unsigned _num_matching;
 static inline matchframe* find_matchframe_create(yed_frame *frame) {
     matchframe mf;
     mf.yed_frame = frame;
-    mf.matches = array_make_with_cap(Match, FIND_DEFAULT_NUM_MATCHES);
+    mf.matches = array_make_with_cap(match, FIND_DEFAULT_NUM_MATCHES);
     array_push(_matchframes, mf);
     return array_last(_matchframes);
 }
@@ -61,6 +61,53 @@ static int find_matchframe_num_matches (matchframe *mf) {
     return array_len(mf->matches);
 }
 
+int find_matchframe_cursor_nearest_match(matchframe *mf,
+                                         int *row,
+                                         int *col,
+                                         int direction)
+{
+    match *m;
+    int r, c;
+
+    r = mf->yed_frame->cursor_line;
+    c = mf->yed_frame->cursor_col;
+
+    if (find_matchframe_num_matches(mf) == 0)
+        return 1;
+
+    /*
+     * This relies on the fact that the array of matches is in sorted order in
+     * terms of row and column because matches are found linearly through the
+     * buffer.
+     */
+
+    if (direction > 0) {
+        array_traverse(mf->matches, m) {
+            if (m->line == r && m->start > c)
+                goto found;
+            if (m->line > r)
+                goto found;
+        }
+        m = array_item(mf->matches, 0);
+        yed_cprint("Search hit bottom, continuing at top");
+    }
+    else {
+        array_rtraverse(mf->matches, m) {
+            if (m->line == r && m->start < c - 1)
+                goto found;
+            if (m->line < r)
+                goto found;
+        }
+        m = array_last(mf->matches);
+        yed_cprint("Search hit top, continuing at bottom");
+    }
+
+found:
+    *row = m->line;
+    *col = m->start + 1;
+    return 0;
+}
+
 static int find_matchframe_push_match (matchframe *mf,
                                        int row,
                                        int offset,
@@ -72,7 +119,7 @@ static int find_matchframe_push_match (matchframe *mf,
      * length. Once we configure subexpressions (for replacing, later on), we
      * will revist this.
      */
-    Match m;
+    match m;
     m.line = row;
     m.start = matches[0].rm_so + offset;
     m.end = matches[0].rm_eo + offset;
@@ -86,6 +133,7 @@ static int find_matchframe_push_match (matchframe *mf,
 
 void find_matchframe_highlight_handler(yed_event *event) {
     matchframe *mf;
+    match      *m;
     yed_attrs  *attr, search, search_cursor, *set;
     yed_frame  *frame;
 
@@ -108,7 +156,6 @@ void find_matchframe_highlight_handler(yed_event *event) {
      * TODO: Inefficient. On each line render, goes through each match in the
      * array to find any matches on this row's line.
      */
-    Match *m;
     array_traverse(mf->matches, m) {
         if (m->line != event->row)
             continue;
@@ -346,18 +393,34 @@ void find_regex_search(int n_args, char **args) {
         find_pattern_bad();
 }
 
-void find_cursor_next_match(int n_args, char **args) {
+void find_cursor_nearest_match(int n_args, char **args, int direction) {
+    int row, col;
+    yed_frame  *frame;
+    matchframe *mf;
+
     if (n_args > 0) {
         yed_cerr("Expected zero arguments.");
         return;
     }
+
+    if (!ys->active_frame || !ys->active_frame->buffer)
+        return;
+    frame = ys->active_frame;
+
+    mf = find_matchframe_get(frame);
+    if (!mf)
+        return;
+
+    if (find_matchframe_cursor_nearest_match(mf, &row, &col, direction) == 0)
+        yed_set_cursor_far_within_frame(frame, row, col);
+}
+
+void find_cursor_next_match(int n_args, char **args) {
+    find_cursor_nearest_match(n_args, args, 1);
 }
 
 void find_cursor_prev_match(int n_args, char **args) {
-    if (n_args > 0) {
-        yed_cerr("Expected zero arguments.");
-        return;
-    }
+    find_cursor_nearest_match(n_args, args, -1);
 }
 
 void find_set_search_all_frames(int n_args, char **args) {
