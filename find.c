@@ -319,6 +319,7 @@ int find_pattern_compile() {
 
 void find_search_interactive_start() {
     find_pattern_clear();
+
     ys->interactive_command = "find-in-buffer";
     /* TODO: Make the cmd_prompt a yed var for this plugin */
     ys->cmd_prompt = _cmd_prompt;
@@ -377,7 +378,7 @@ void find_regex_search(int n_args, char **args) {
 
     if (!ys->interactive_command) {
         if (n_args == 0) {
-            /* YEXE("find") enters interactive mode */
+            /* YEXE("find-in-buffer") enters interactive mode */
             find_search_interactive_start();
             return;
         }
@@ -478,11 +479,7 @@ void find_set_search_prompt(int n_args, char **args) {
 
 void find_unload (yed_plugin *self) {
     yed_event_handler h;
-
-    array_free(_matchframes);
-    array_free(_pattern);
-
-    free(_cmd_prompt);
+    matchframe *mf;
 
     /* remove our custom search highlighter */
     h.kind = EVENT_LINE_PRE_DRAW;
@@ -493,6 +490,14 @@ void find_unload (yed_plugin *self) {
     h.kind = EVENT_LINE_PRE_DRAW;
     h.fn   = yed_search_line_handler;
     yed_add_event_handler(h);
+
+    array_traverse(_matchframes, mf) {
+        array_free(mf->matches);
+    }
+    array_free(_matchframes);
+    array_free(_pattern);
+
+    free(_cmd_prompt);
 }
 
 int yed_plugin_boot(yed_plugin *self) {
