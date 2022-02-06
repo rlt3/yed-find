@@ -5,15 +5,17 @@
 #define FIND_DEFAULT_NUM_MATCHFRAMES 16
 #define FIND_DEFAULT_NUM_MATCHES 16
 #define FIND_DEFAULT_PATTERN_LEN 16
+#define FIND_DEFAULT_CMD_PROMPT "(find-in-buffer) "
+
+/**
+ * PROPERTIES
+ */
 
 typedef struct matchframe {
     /* which frame this holds information for */
     yed_frame *yed_frame;
     /* the matches pertaining to this frame */
     array_t matches;
-    /*
-     * TODO: next/prev indexes
-     */
 } matchframe;
 
 typedef struct match {
@@ -24,10 +26,22 @@ typedef struct match {
     size_t end;
 } match;
 
+/* all frames and the matches therein */
 static array_t _matchframes;
+
+/*
+ * the string pattern and its compiled representation. only one pattern (a
+ * search) exists at a time.
+ */
 static array_t _pattern;
 static regex_t _regex;
+
+static char *_cmd_prompt;
 static unsigned _num_matching;
+
+/**
+ * MATCHFRAME
+ */
 
 static inline matchframe* find_matchframe_create(yed_frame *frame) {
     matchframe mf;
@@ -53,24 +67,70 @@ static inline matchframe* find_matchframe_get_or_create(yed_frame *frame) {
     return mf;
 }
 
-static void find_matchframe_clear (matchframe *mf) {
+static void find_matchframe_clear(matchframe *mf) {
     array_clear(mf->matches);
 }
 
-static int find_matchframe_num_matches (matchframe *mf) {
+static int find_matchframe_num_matches(matchframe *mf) {
     return array_len(mf->matches);
 }
 
+void find_matchframe_highlight_handler(yed_event *event) {
+    matchframe *mf;
+    match      *m;
+    yed_attrs  *attr, search, search_cursor, *set;
+    yed_frame  *frame;
+
+    if (!event->frame)
+        return;
+
+    /* if we don't have any matches for this frame, go next */
+    mf = find_matchframe_get(event->frame);
+    if (!mf)
+        return;
+
+    frame = mf->yed_frame;
+    if (frame != ys->active_frame || !frame->buffer)
+        return;
+
+
+    /* get the current styles for the search and search cursor */
+    search        = yed_active_style_get_search();
+    search_cursor = yed_active_style_get_search_cursor();
+
+    array_traverse(mf->matches, m) {
+        if (m->line != event->row)
+            continue;
+        for (unsigned col = m->start; col < m->end; col++) {
+            /* if cursor is within the match, use its style */
+            set = (event->row == frame->cursor_line && col == frame->cursor_col - 1)
+                        ? &search_cursor
+                        : &search;
+            /* set the search styles or just raw highlight if not styling */
+            attr = array_item(event->line_attrs, col);
+            if (ys->active_style) {
+                yed_combine_attrs(attr, set);
+            } else {
+                attr->flags ^= ATTR_INVERSE;
+            }
+        }
+    }
+}
+
+/*
+ * Given row and column `r', `c', search for nearest match in a particular
+ * direction (up or down the buffer). Sets the position of the match in `row'
+ * and `col' and returns 1 if there are matches. Otherwise, `row' and `col' are
+ * not touched and this returns 0.
+ */
 int find_matchframe_cursor_nearest_match(matchframe *mf,
+                                         int r,
+                                         int c,
                                          int *row,
                                          int *col,
                                          int direction)
 {
     match *m;
-    int r, c;
-
-    r = mf->yed_frame->cursor_line;
-    c = mf->yed_frame->cursor_col;
 
     if (find_matchframe_num_matches(mf) == 0)
         return 1;
@@ -108,11 +168,11 @@ found:
     return 0;
 }
 
-static int find_matchframe_push_match (matchframe *mf,
-                                       int row,
-                                       int offset,
-                                       int nmatches,
-                                       regmatch_t *matches)
+static inline int find_matchframe_push_match(matchframe *mf,
+                                             int row,
+                                             int offset,
+                                             int nmatches,
+                                             regmatch_t *matches)
 {
     /*
      * Right now we're just using the first item in the array regardless of
@@ -131,55 +191,54 @@ static int find_matchframe_push_match (matchframe *mf,
     return matches[0].rm_eo + 1;
 }
 
-void find_matchframe_highlight_handler(yed_event *event) {
-    matchframe *mf;
-    match      *m;
-    yed_attrs  *attr, search, search_cursor, *set;
-    yed_frame  *frame;
-
-    if (!event->frame)
-        return;
-    frame = event->frame;
-    if (frame != ys->active_frame || !frame->buffer)
-        return;
-
-    /* if we don't have any matches for this frame, go next */
-    mf = find_matchframe_get(frame);
-    if (!mf)
-        return;
-
-    /* get the current styles for the search and search cursor */
-    search        = yed_active_style_get_search();
-    search_cursor = yed_active_style_get_search_cursor();
-
+int find_matchframe_search_in_buffer(matchframe *mf) {
+    /* TODO: execute flags */
+    static const int flags = 0;
     /*
-     * TODO: Inefficient. On each line render, goes through each match in the
-     * array to find any matches on this row's line.
+     * Right now we only have one matching buffer. For matching subexpressions
+     * we would have to pass more, but I'm not sure how to get the number of
+     * matches an expression matched.
      */
-    array_traverse(mf->matches, m) {
-        if (m->line != event->row)
-            continue;
-        for (unsigned col = m->start; col < m->end; col++) {
-            /* if cursor is within the match, use its style */
-            set = (event->row == frame->cursor_line && col == frame->cursor_col - 1)
-                        ? &search_cursor
-                        : &search;
-            /* set the search styles or just raw highlight if not styling */
-            attr = array_item(event->line_attrs, col);
-            if (ys->active_style) {
-                yed_combine_attrs(attr, set);
-            } else {
-                attr->flags ^= ATTR_INVERSE;
-            }
+    static const size_t nmatches = 1;
+
+    regmatch_t  match[nmatches];
+    int         status;
+    int         row;
+    char       *line;
+    int         len;
+    int         offset;
+
+    /* always clear out any matches on a new search */
+    find_matchframe_clear(mf);
+
+    /* search within each line of the buffer */
+    row = 1;
+    while (1) {
+        line = yed_get_line_text(mf->yed_frame->buffer, row);
+        if (!line)
+            break;
+
+        /* find every match within each line */
+        len = strlen(line);
+        offset = 0;
+        while (offset < len) {
+            status = regexec(&_regex, line + offset, nmatches, match, flags);
+            if (status != 0)
+                break;
+            offset += find_matchframe_push_match(mf, row, offset, nmatches, match);
         }
+
+        free(line);
+        row++;
     }
+
+    return find_matchframe_num_matches(mf);
 }
 
-
-
-/*
- * Convenience functions for always having the pattern be null-terminated
+/**
+ * PATTERN
  */
+
 static inline void find_pattern_terminate() {
     /* end-of-string, helps when passing values into the macro-only array library */
     static char EOS = '\0';
@@ -248,64 +307,21 @@ static inline void find_pattern_error(const int status) {
     }
 }
 
-int find_regex_compile() {
+int find_pattern_compile() {
     /* TODO: compilation flags */
     static const int flags = 0;
     return regcomp(&_regex, array_data(_pattern), flags);
 }
 
-int find_search_in_buffer(yed_frame *frame) {
-    /* TODO: execute flags */
-    static const int flags = 0;
-    /* 
-     * Right now we only have one matching buffer. For matching subexpressions
-     * we would have to pass more, but I'm not sure how to get the number of
-     * matches an expression matched.
-     */
-    static const size_t nmatches = 1;
-
-    regmatch_t  match[nmatches];
-    matchframe *mf;
-    int         status;
-    int         row;
-    char       *line;
-    int         len;
-    int         offset;
-
-    mf = find_matchframe_get_or_create(frame);
-    /* always clear out any matches on a new search */
-    find_matchframe_clear(mf);
-
-    /* search within each line of the buffer */
-    row = 1;
-    while (1) {
-        line = yed_get_line_text(frame->buffer, row);
-        if (!line)
-            break;
-
-        /* find every match within each line */
-        len = strlen(line);
-        offset = 0;
-        while (offset < len) {
-            status = regexec(&_regex, line + offset, nmatches, match, flags);
-            if (status != 0)
-                break;
-            offset += find_matchframe_push_match(mf, row, offset, nmatches, match);
-        }
-
-        free(line);
-        row++;
-    }
-
-    return find_matchframe_num_matches(mf);
-}
+/**
+ * INTERACTIVE SEARCH HANDLERS
+ */
 
 void find_search_interactive_start() {
     find_pattern_clear();
-
     ys->interactive_command = "find-in-buffer";
     /* TODO: Make the cmd_prompt a yed var for this plugin */
-    ys->cmd_prompt = "/";
+    ys->cmd_prompt = _cmd_prompt;
 
     ys->search_save_row = ys->active_frame->cursor_line;
     ys->search_save_col = ys->active_frame->cursor_col;
@@ -324,12 +340,14 @@ void find_search_interactive_build_pattern(char key) {
     find_pattern_replace(array_data(ys->cmd_buff));
 }
 
-void find_search_interactive_cancel() {
+void find_search_interactive_cancel(matchframe *mf) {
     /* handle canceling a search part-way through */
     ys->interactive_command = NULL;
     ys->current_search      = NULL;
     yed_clear_cmd_buff();
+
     find_pattern_clear();
+    find_matchframe_clear(mf);
     _num_matching = 0;
 }
 
@@ -340,14 +358,22 @@ void find_search_interactive_finish() {
     yed_clear_cmd_buff();
 }
 
+/**
+ * YED BINDINGS
+ */
+
 void find_regex_search(int n_args, char **args) {
-    yed_frame *frame;
-    int        key;
-    int        status;
+    yed_frame  *frame;
+    matchframe *mf;
+    int         key;
+    int         status;
+    int         row, col;
 
     if (!ys->active_frame || !ys->active_frame->buffer)
         return;
     frame = ys->active_frame;
+
+    mf = find_matchframe_get_or_create(frame);
 
     if (!ys->interactive_command) {
         if (n_args == 0) {
@@ -363,8 +389,8 @@ void find_regex_search(int n_args, char **args) {
         switch (key) {
             case ESC:
             case CTRL_C:
-                find_search_interactive_cancel();
-                break;
+                find_search_interactive_cancel(mf);
+                goto reset_cursor;
 
             case ENTER:
                 find_search_interactive_finish();
@@ -376,25 +402,35 @@ void find_regex_search(int n_args, char **args) {
         }
     }
 
-    status = find_regex_compile();
+    status = find_pattern_compile();
     if (status != 0) {
         if (!ys->interactive_command)
             find_pattern_error(status);
         return;
     }
 
-    /*
-     * TODO: travel to first instance of match in frame. if
-     * canceling or pattern doesn't match anymore, go back to the
-     * original searching place.
-     */
-    _num_matching = find_search_in_buffer(frame);
-    if (_num_matching == 0 && !ys->interactive_command)
-        find_pattern_bad();
+    _num_matching = find_matchframe_search_in_buffer(mf);
+    if (_num_matching == 0) {
+        if (!ys->interactive_command)
+            find_pattern_bad();
+        /* otherwise, just reset the row, col to original location */
+reset_cursor:
+        row = ys->search_save_row;
+        col = ys->search_save_col;
+    } else {
+        /* use the saved location of the cursor to find nearest match */
+        find_matchframe_cursor_nearest_match(mf,
+                ys->search_save_row, ys->search_save_col,
+                &row, &col,
+                1); /* TODO: use a direction when searching backwards */
+    }
+
+    yed_set_cursor_far_within_frame(frame, row, col);
 }
 
 void find_cursor_nearest_match(int n_args, char **args, int direction) {
     int row, col;
+    int r, c;
     yed_frame  *frame;
     matchframe *mf;
 
@@ -411,7 +447,10 @@ void find_cursor_nearest_match(int n_args, char **args, int direction) {
     if (!mf)
         return;
 
-    if (find_matchframe_cursor_nearest_match(mf, &row, &col, direction) == 0)
+    r = frame->cursor_line;
+    c = frame->cursor_col;
+
+    if (find_matchframe_cursor_nearest_match(mf, r, c, &row, &col, direction) == 0)
         yed_set_cursor_far_within_frame(frame, row, col);
 }
 
@@ -424,9 +463,17 @@ void find_cursor_prev_match(int n_args, char **args) {
 }
 
 void find_set_search_all_frames(int n_args, char **args) {
+    yed_cerr("Not implemented!");
 }
 
 void find_set_search_prompt(int n_args, char **args) {
+    if (n_args < 1) {
+        yed_cerr("Expected one argument.");
+        return;
+    }
+
+    free(_cmd_prompt);
+    _cmd_prompt = strdup(args[0]);
 }
 
 void find_unload (yed_plugin *self) {
@@ -434,6 +481,8 @@ void find_unload (yed_plugin *self) {
 
     array_free(_matchframes);
     array_free(_pattern);
+
+    free(_cmd_prompt);
 
     /* remove our custom search highlighter */
     h.kind = EVENT_LINE_PRE_DRAW;
@@ -446,13 +495,13 @@ void find_unload (yed_plugin *self) {
     yed_add_event_handler(h);
 }
 
-
 int yed_plugin_boot(yed_plugin *self) {
     YED_PLUG_VERSION_CHECK();
 
     yed_plugin_set_unload_fn(self, find_unload);
     _matchframes = array_make_with_cap(matchframe, FIND_DEFAULT_NUM_MATCHFRAMES);
     _pattern = array_make_with_cap(char,  FIND_DEFAULT_PATTERN_LEN);
+    _cmd_prompt = strdup(FIND_DEFAULT_CMD_PROMPT);
 
     /* remove default search highlighter */
     yed_event_handler h;
