@@ -20,6 +20,7 @@ typedef struct replace_properties {
     int start_line;      /* the starting and ending lines of the replacement */
     int end_line;
     char *replacement;   /* the string replacing the matches */
+    int replacement_len;
 } replace_properties;
 
 typedef struct matchframe {
@@ -486,6 +487,7 @@ int find_parse_replace_expression(matchframe *mf,
     rp->start_line = -1;
     rp->end_line = -1;
     rp->replacement = NULL;
+    rp->replacement_len = 0;
 
     status = regcomp(&regex, pattern, REG_EXTENDED);
     if (status != 0) {
@@ -556,6 +558,7 @@ int find_parse_replace_expression(matchframe *mf,
      */
     find_fill_match_buff(buff, 256, exp, match[4]);
     rp->replacement = strdup(buff);
+    rp->replacement_len = match[4].rm_eo - match[4].rm_so;
 
     /*
      * If the 5th match exists, then we need to match specific search options.
@@ -584,6 +587,9 @@ void find_regex_replace(int n_args, char **args) {
     match             *m;
     int                num_matches;
 	int				   status;
+    int                match_len;
+    int                offset;
+    int                last_line;
 
     if (n_args == 0 || n_args > 1) {
         yed_cerr("Expected 1 argument, received %d", n_args);
@@ -611,20 +617,38 @@ void find_regex_replace(int n_args, char **args) {
         return;
     }
 
+    last_line = -1;
+    offset = 0;
     buffer = mf->yed_frame->buffer;
     array_traverse(mf->matches, m) {
+        match_len = m->end - m->start;
+
         /*
-         * TODO:
-         * This works for removing the entire match if only one match exists
-         * in the line. Removing and inserting characters into the line affects
-         * the match column offsets.
+         * Matches are stored as offsets into the line, but we are deleting and
+         * inserting from that line which moves those offsets. We keep an
+         * offset for each match in a line. Every new line, we reset the
+         * offset.
          */
-        for (unsigned col = m->start; col < m->end; col++) {
-            yed_delete_from_line(buffer, m->line, m->start + 1);
+        if (last_line != m->line)
+            offset = 0;
+        last_line = m->line;
+
+        /* delete the match one character at a time */
+        for (unsigned i = m->start; i < m->end; i++)
+            yed_delete_from_line(buffer, m->line, m->start + 1 + offset);
+
+        /* insert replacement one character at a time, in reverse */
+        if (rp.replacement[0] != '\0') {
+            for (int i = rp.replacement_len - 1; i >= 0; i--) {
+                yed_insert_into_line(buffer,
+                        m->line,
+                        m->start + 1 + offset,
+                        G(rp.replacement[i]));
+            }
+            offset += rp.replacement_len - match_len;
+        } else {
+            offset -= match_len;
         }
-        //for (int i = 0; rp.replacement[i] != '\0'; i++) {
-        //    yed_insert_into_line(buffer, m->line, m->line + i, G(rp.replacement[i]));
-        //}
     }
 
     find_matchframe_clear(mf);
