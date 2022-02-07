@@ -583,6 +583,7 @@ void find_regex_replace(int n_args, char **args) {
     matchframe        *mf;
     match             *m;
     int                num_matches;
+	int				   status;
 
     if (n_args == 0 || n_args > 1) {
         yed_cerr("Expected 1 argument, received %d", n_args);
@@ -597,7 +598,12 @@ void find_regex_replace(int n_args, char **args) {
     if (find_parse_replace_expression(mf, &rp, args[0]) != 0)
         return;
 
-    find_pattern_compile(rp.is_ignore_case);
+    status = find_pattern_compile(rp.is_ignore_case);
+    if (status != 0) {
+        find_pattern_error(status);
+        return;
+    }
+
     /* TODO: search from start to end line, or specific lines */
     num_matches = find_matchframe_search_in_buffer(mf, rp.is_global);
     if (num_matches == 0) {
