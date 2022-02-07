@@ -1,15 +1,77 @@
 .TH YED-FIND 7 "YED Plugin Manuals" "" "YED Plugin Manuals"
+
 .SH NAME
-find \- Find text with a buffer using regex.
+find \- A drop-in replacement for the default find-in-buffer implementation featuring regular expressions and find-and-replace.
+
 .SH CONFIGURATION
-None
+.SS find-set-search-prompt <prompt>
+Set the prompt which appears during interactive command mode when running `find-in-buffer`. Default is 'find-in-buffer '.
+
+.SS find-set-search-all-frames <boolean>
+Set true or false whether to search all frames for strings. Default is 'true'.
+
 .SH COMMANDS
-N/A
+.SS find-in-buffer [expression]
+Searches the buffer and highlights matches.
+
+Expression can be a regular expression. If one is given, search the entire
+buffer for strings which match the regular expression. If no expression is
+given then interactive command mode is activated and strings in the buffer are
+highlighted as they are matched.
+.SS find-and-replace <expression>
+Use the expression to find matches in the buffer and replace them with a given
+string.
+
+Expression format: [start,][end][%]s/[search]/[replacement]/[options]
+
+`start` is the line where searching begins. If `start` is given, `end` is
+required.
+
+`end' is the end line to stop searching. If only `end` is given (with no
+`start`), then we assume we are only searching that line.
+
+`%` means to search all lines. If '%' is present, `start` and `end` should not be.
+
+`search` is an optional regular expression used to find matches. If no `search`
+expression is given, then the expression from `find-in-buffer` is used.
+
+`replacement` is an optional string that replaces any matches in the buffer. If
+`replacement` isn't given, matches will be removed from the buffer, i.e. replaced with nothing.
+
+`options` are a combination of 'g', 'i', and 'c' which means to search globally
+(multiple times) in a line, ignore case, and confirm each replacement
+respectively.
+
+Examples:
+
+    s/foo/bar/g : replace all instances of `foo` with `bar` on the current line
+
+    256s/->/\\./ : replace the first instance of `->` with `.` on line 256
+
+    %s/BAD//g : remove all instances of `BAD` from the buffer
+
+    %s/for/loop/gc : replace all instances of `for` with `loop` and confirm each replacement
+
+    0,5s/global/GLOBAL/i : replace the first instance of `global`, case ignored, with `GLOBAL` on lines 0 through 5
+
+    %s//foobar/g : replace the current matches in the buffer with `foobar`
+
+    %s///g : remove the current matches from the buffer
+
+.SS find-next-in-buffer
+Moves the cursor to the next match in the buffer. Moves the cursor to the next match at the top of the buffer if at the bottom.
+
+.SS find-prev-in-buffer
+Moves the cursor to the previous match in the buffer. Moves the cursor to the next match at the bottom of the buffer if at the top.
+
 .SH BUFFERS
-N/A
+None
+
 .SH NOTES
-N/A
+Replaces the following default commands: `find-in-buffer`, `find-next-in-buffer`, `find-prev-in-buffer`.
+
 .SH VERSION
 0.0.1
+
 .SH KEYWORDS
 find, search, regex, regular

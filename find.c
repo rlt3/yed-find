@@ -689,7 +689,7 @@ void find_cursor_prev_match(int n_args, char **args) {
 }
 
 void find_set_search_all_frames(int n_args, char **args) {
-    yed_cerr("Not implemented!");
+    yed_cerr("TODO: Not implemented!");
 }
 
 void find_set_search_prompt(int n_args, char **args) {
