@@ -18,6 +18,7 @@ Expression can be a regular expression. If one is given, search the entire
 buffer for strings which match the regular expression. If no expression is
 given then interactive command mode is activated and strings in the buffer are
 highlighted as they are matched.
+
 .SS find-and-replace <expression>
 Use the expression to find matches in the buffer and replace them with a given
 string.
@@ -70,8 +71,12 @@ None
 .SH NOTES
 Replaces the following default commands: `find-in-buffer`, `find-next-in-buffer`, `find-prev-in-buffer`.
 
+The following features have not been implemented yet: searching all frames,
+searching specific lines or a range of lines during `find-and-replace` (all
+lines are always searched), and replacement confirmation.
+
 .SH VERSION
 0.0.1
 
 .SH KEYWORDS
-find, search, regex, regular
+find, search, regex, regular, expression
