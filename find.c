@@ -233,9 +233,11 @@ int find_matchframe_search_in_buffer(matchframe *mf, int is_global) {
         offset = 0;
         while (offset < len) {
             status = regexec(&_regex, line + offset, nmatches, match, flags);
-            if (status != 0 || !is_global)
+            if (status != 0)
                 break;
             offset += find_matchframe_push_match(mf, row, offset, nmatches, match);
+            if (!is_global)
+                break;
         }
 
         free(line);
