@@ -206,7 +206,7 @@ int find_pattern_compile(int is_ignore_case) {
 static inline matchframe* find_matchframe_create(yed_frame *frame) {
     matchframe mf;
     mf.yed_frame = frame;
-    mf.matches = array_make_with_cap(match, FIND_DEFAULT_NUM_MATCHES);
+    mf.matches = array_make_with_cap(match, FIND_DEFAULT_ARRAY_LEN);
     array_push(_matchframes, mf);
     return array_last(_matchframes);
 }
