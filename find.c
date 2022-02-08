@@ -2,10 +2,9 @@
 #include <yed/syntax.h>
 #include <regex.h>
 
-#define FIND_DEFAULT_NUM_MATCHFRAMES 16
-#define FIND_DEFAULT_NUM_MATCHES 16
-#define FIND_DEFAULT_PATTERN_LEN 16
-#define FIND_DEFAULT_CMD_PROMPT "(find-in-buffer) "
+#define FIND_DEFAULT_ARRAY_LEN 16
+#define FIND_DEFAULT_FIND_PROMPT "(find-in-buffer) "
+#define FIND_DEFAULT_REPLACE_PROMPT "(replace-current-search) "
 
 /**
  * PROPERTIES
@@ -19,8 +18,7 @@ typedef struct replace_properties {
     int is_ignore_case;  /* ignore character case when searching? */
     int start_line;      /* the starting and ending lines of the replacement */
     int end_line;
-    char *replacement;   /* the string replacing the matches */
-    int replacement_len;
+    array_t replacement; /* the string replacing the matches */
 } replace_properties;
 
 typedef struct matchframe {
@@ -48,7 +46,158 @@ static array_t _matchframes;
 static array_t _pattern;
 static regex_t _regex;
 
-static char *_cmd_prompt;
+/*
+ * Used globally to hold replacement data. This data can be built
+ * interactively, so it needs to be persistent, hence global.
+ */
+static replace_properties _replace_properties;
+
+yed_cmd_line_readline_ptr_t  _search_readline;
+array_t _search_hist;
+static int _search_save_row;
+static int _search_save_col;
+
+enum find_command {
+    FIND_IN_BUFFER,
+    REPLACE_CURRENT_SEARCH,
+    FIND_NEXT_IN_BUFFER,
+    FIND_PREV_IN_BUFFER,
+    FIND_AND_REPLACE,
+};
+
+/*
+ * Because we optionally overwrite default yed commands, this is a useful
+ * interface for setting and getting the command names.
+ */
+char* find_get_command(enum find_command cmd) {
+    int replaced = 0;
+    if (strcmp(yed_get_var("find-regex-replace-default-commands"), "true") == 0)
+        replaced = 1;
+
+    if (!replaced) {
+        switch (cmd) {
+            case FIND_IN_BUFFER: return "find-in-buffer-regex";
+            case REPLACE_CURRENT_SEARCH: return "replace-current-search-regex";
+            case FIND_NEXT_IN_BUFFER: return "find-next-in-buffer-regex";
+            case FIND_PREV_IN_BUFFER: return "find-prev-in-buffer-regex";
+            case FIND_AND_REPLACE: return "find-and-replace-regex";
+        }
+    } else {
+        switch (cmd) {
+            case FIND_IN_BUFFER: return "find-in-buffer";
+            case REPLACE_CURRENT_SEARCH: return "replace-current-search";
+            case FIND_NEXT_IN_BUFFER: return "find-next-in-buffer";
+            case FIND_PREV_IN_BUFFER: return "find-prev-in-buffer";
+            /* find-and-replace always has -regex appended */
+            case FIND_AND_REPLACE: return "find-and-replace-regex";
+        }
+    }
+
+    return "BAD";
+}
+
+/**
+ * ARRAY
+ */
+
+void find_array_terminate(array_t *arr) {
+    /* end-of-string, helps when passing values into the macro-only array library */
+    static char EOS = '\0';
+    array_push(*arr, EOS);
+}
+
+void find_array_replace(array_t *arr, char *s) {
+    array_clear(*arr);
+    for (int i = 0; s[i] != '\0'; i++)
+        array_push(*arr, s[i]);
+    find_array_terminate(arr);
+}
+
+/**
+ * REPLACE PROPERTIES
+ */
+
+replace_properties* find_replace_properties_reset() {
+    _replace_properties.is_all_lines = 0;
+    _replace_properties.is_single_line = 0;
+    _replace_properties.is_global = 0;
+    _replace_properties.is_confirm = 0;
+    _replace_properties.is_ignore_case = 0;
+    _replace_properties.start_line = -1;
+    _replace_properties.end_line = -1;
+    array_clear(_replace_properties.replacement);
+    return &_replace_properties;
+}
+
+replace_properties* find_replace_properties_get() {
+    return &_replace_properties;
+}
+
+/**
+ * PATTERN
+ */
+
+void find_pattern_clear() {
+    array_clear(_pattern);
+    find_array_terminate(&_pattern);
+}
+
+int find_pattern_exists() {
+    /* if the pattern has anything more than the null terminator, it exists */
+    return (array_len(_pattern) > 1);
+}
+
+void find_pattern_bad() {
+    yed_cprint("Pattern not found: %s", array_data(_pattern));
+}
+
+static inline void find_pattern_error(const int status) {
+    switch (status) {
+        case REG_BADBR:
+            yed_cerr("[FIND] Invalid curly bracket or brace usage!");
+            break;
+        case REG_BADPAT:
+            yed_cerr("[FIND] Syntax error in pattern!");
+            break;
+        case REG_BADRPT:
+            yed_cerr("[FIND] Repititon character, e.g. `?' or `*', appeared in bad position!");
+            break;
+        case REG_ECOLLATE:
+            yed_cerr("[FIND] Invalid collation!");
+            break;
+        case REG_ECTYPE:
+            yed_cerr("[FIND] Invalid class character name!");
+            break;
+        case REG_EESCAPE:
+            yed_cerr("[FIND] Invalid escape sequence!");
+            break;
+        case REG_ESUBREG:
+            yed_cerr("[FIND] Invalid number in the `\\digit' construct!");
+            break;
+        case REG_EBRACK:
+            yed_cerr("[FIND] Unbalanced square brackets!");
+            break;
+        case REG_EPAREN:
+            yed_cerr("[FIND] Unbalanced parentheses!");
+            break;
+        case REG_EBRACE:
+            yed_cerr("[FIND] Unbalanced curly bracket or brace!");
+            break;
+        case REG_ERANGE:
+            yed_cerr("[FIND] Endpoint of range expression invalid!");
+            break;
+        case REG_ESPACE:
+            yed_cerr("[FIND] Out of memory!!!");
+            break;
+    }
+}
+
+int find_pattern_compile(int is_ignore_case) {
+    int flags = 0;
+    if (is_ignore_case)
+        flags |= REG_ICASE;
+    return regcomp(&_regex, array_data(_pattern), flags);
+}
 
 /**
  * MATCHFRAME
@@ -143,8 +292,11 @@ int find_matchframe_cursor_nearest_match(matchframe *mf,
 {
     match *m;
 
-    if (find_matchframe_num_matches(mf) == 0)
+    if (find_matchframe_num_matches(mf) == 0) {
+        if (find_pattern_exists())
+            find_pattern_bad();
         return 1;
+    }
 
     /*
      * This relies on the fact that the array of matches is in sorted order in
@@ -248,127 +400,108 @@ int find_matchframe_search_in_buffer(matchframe *mf, int is_global) {
     return find_matchframe_num_matches(mf);
 }
 
-/**
- * PATTERN
- */
+void find_matchframe_replace(matchframe *mf) {
+    replace_properties *rp;
+    yed_buffer *buffer;
+    match      *m;
+    char       *replacement;
+    int         replacement_len;
+    int         num_matches;
+	int		    status;
+    int         match_len;
+    int         offset;
+    int         last_line;
 
-static inline void find_pattern_terminate() {
-    /* end-of-string, helps when passing values into the macro-only array library */
-    static char EOS = '\0';
-    array_push(_pattern, EOS);
-}
+    rp = find_replace_properties_get();
 
-static inline void find_pattern_clear() {
-    array_clear(_pattern);
-    find_pattern_terminate();
-}
-
-static inline int find_pattern_exists() {
-    /* if the pattern has anything more than the null terminator, it exists */
-    return (array_len(_pattern) > 1);
-}
-
-static inline void find_pattern_replace(char *patt) {
-    array_clear(_pattern);
-    for (int i = 0; patt[i] != '\0'; i++)
-        array_push(_pattern, patt[i]);
-    find_pattern_terminate();
-}
-
-static inline void find_pattern_bad() {
-    yed_cprint("Pattern not found: %s", array_data(_pattern));
-}
-
-static inline void find_pattern_error(const int status) {
-    switch (status) {
-        case REG_BADBR:
-            yed_cerr("[FIND] Invalid curly bracket or brace usage!");
-            break;
-        case REG_BADPAT:
-            yed_cerr("[FIND] Syntax error in pattern!");
-            break;
-        case REG_BADRPT:
-            yed_cerr("[FIND] Repititon character, e.g. `?' or `*', appeared in bad position!");
-            break;
-        case REG_ECOLLATE:
-            yed_cerr("[FIND] Invalid collation!");
-            break;
-        case REG_ECTYPE:
-            yed_cerr("[FIND] Invalid class character name!");
-            break;
-        case REG_EESCAPE:
-            yed_cerr("[FIND] Invalid escape sequence!");
-            break;
-        case REG_ESUBREG:
-            yed_cerr("[FIND] Invalid number in the `\\digit' construct!");
-            break;
-        case REG_EBRACK:
-            yed_cerr("[FIND] Unbalanced square brackets!");
-            break;
-        case REG_EPAREN:
-            yed_cerr("[FIND] Unbalanced parentheses!");
-            break;
-        case REG_EBRACE:
-            yed_cerr("[FIND] Unbalanced curly bracket or brace!");
-            break;
-        case REG_ERANGE:
-            yed_cerr("[FIND] Endpoint of range expression invalid!");
-            break;
-        case REG_ESPACE:
-            yed_cerr("[FIND] Out of memory!!!");
-            break;
+    status = find_pattern_compile(rp->is_ignore_case);
+    if (status != 0) {
+        find_pattern_error(status);
+        return;
     }
-}
 
-int find_pattern_compile(int is_ignore_case) {
-    int flags = 0;
-    if (is_ignore_case)
-        flags |= REG_ICASE;
-    return regcomp(&_regex, array_data(_pattern), flags);
+    /* TODO: search from start to end line, or specific lines */
+    num_matches = find_matchframe_search_in_buffer(mf, rp->is_global);
+    if (num_matches == 0) {
+        find_pattern_bad();
+        return;
+    }
+
+    buffer = mf->yed_frame->buffer;
+    replacement = array_data(rp->replacement);
+    replacement_len = array_len(rp->replacement) - 1;
+
+    last_line = -1;
+    offset = 0;
+    array_traverse(mf->matches, m) {
+        match_len = m->end - m->start;
+
+        /*
+         * Matches are stored as offsets into the line, but we are deleting and
+         * inserting from that line which moves those offsets. We keep a local
+         * offset for each match in a line to deal with where the replacement
+         * should go versus the match's position.
+         */
+        if (last_line != m->line)
+            offset = 0;
+        last_line = m->line;
+
+        /* delete the match one character at a time */
+        for (unsigned i = m->start; i < m->end; i++)
+            yed_delete_from_line(buffer, m->line, m->start + 1 + offset);
+
+        /* insert replacement one character at a time, in reverse */
+        if (replacement[0] != '\0') {
+            for (int i = replacement_len - 1; i >= 0; i--) {
+                yed_insert_into_line(buffer,
+                        m->line,
+                        m->start + 1 + offset,
+                        G(replacement[i]));
+            }
+            offset += replacement_len - match_len;
+        } else {
+            offset -= match_len;
+        }
+    }
+
+    find_matchframe_clear(mf);
 }
 
 /**
  * INTERACTIVE SEARCH HANDLERS
  */
 
-void find_search_interactive_start() {
-    find_pattern_clear();
+void find_interactive_mode_start(int is_find) {
+    if (is_find) {
+        ys->interactive_command = find_get_command(FIND_IN_BUFFER);
+        ys->cmd_prompt = yed_get_var("find-regex-search-prompt");
+    } else {
+        ys->interactive_command = find_get_command(REPLACE_CURRENT_SEARCH);
+        ys->cmd_prompt = yed_get_var("find-regex-replace-prompt");
+    }
 
-    ys->interactive_command = "find-in-buffer";
-    /* TODO: Make the cmd_prompt a yed var for this plugin */
-    ys->cmd_prompt = _cmd_prompt;
-
-    ys->search_save_row = ys->active_frame->cursor_line;
-    ys->search_save_col = ys->active_frame->cursor_col;
+    _search_save_row = ys->active_frame->cursor_line;
+    _search_save_col = ys->active_frame->cursor_col;
 
     yed_clear_cmd_buff();
-    yed_cmd_line_readline_reset(ys->search_readline, &ys->search_hist);
-
-    ys->current_search = array_data(_pattern);
+    yed_cmd_line_readline_reset(_search_readline, &_search_hist);
 }
 
-void find_search_interactive_build_pattern(char key) {
-    yed_cmd_line_readline_take_key(ys->search_readline, key);
+void find_interactive_mode_build_array(array_t *arr, char key) {
+    yed_cmd_line_readline_take_key(_search_readline, key);
     array_zero_term(ys->cmd_buff);
-    ys->current_search = array_data(ys->cmd_buff);
-    /* assuming that cmd_buff is null terminated */
-    find_pattern_replace(array_data(ys->cmd_buff));
+    find_array_replace(arr, array_data(ys->cmd_buff));
 }
 
-void find_search_interactive_cancel(matchframe *mf) {
+void find_interactive_mode_cancel() {
     /* handle canceling a search part-way through */
     ys->interactive_command = NULL;
-    ys->current_search      = NULL;
     yed_clear_cmd_buff();
-
-    find_pattern_clear();
-    find_matchframe_clear(mf);
 }
 
-void find_search_interactive_finish() {
+void find_interactive_mode_finish() {
     /* handle finalizing a search */
     ys->interactive_command = NULL;
-    ys->current_search = NULL;
     yed_clear_cmd_buff();
 }
 
@@ -393,26 +526,29 @@ void find_regex_search(int n_args, char **args) {
     if (!ys->interactive_command) {
         if (n_args == 0) {
             /* YEXE("find-in-buffer") enters interactive mode */
-            find_search_interactive_start();
+            find_interactive_mode_start(1);
+            find_pattern_clear();
             return;
         }
         /* if a pattern is given immediately, use that */
-        find_pattern_replace(args[0]);
+        find_array_replace(&_pattern, args[0]);
     } else {
         /* on interactive mode, build regex incrementally */
         sscanf(args[0], "%d", &key);
         switch (key) {
             case ESC:
             case CTRL_C:
-                find_search_interactive_cancel(mf);
+                find_interactive_mode_cancel();
+                find_pattern_clear();
+                find_matchframe_clear(mf);
                 goto reset_cursor;
 
             case ENTER:
-                find_search_interactive_finish();
+                find_interactive_mode_finish();
                 break;
 
             default:
-                find_search_interactive_build_pattern(key);
+                find_interactive_mode_build_array(&_pattern, key);
                 break;
         }
     }
@@ -428,14 +564,13 @@ void find_regex_search(int n_args, char **args) {
     if (num_matches == 0) {
         if (!ys->interactive_command)
             find_pattern_bad();
-        /* otherwise, just reset the row, col to original location */
 reset_cursor:
-        row = ys->search_save_row;
-        col = ys->search_save_col;
+        row = _search_save_row;
+        col = _search_save_col;
     } else {
         /* use the saved location of the cursor to find nearest match */
         find_matchframe_cursor_nearest_match(mf,
-                ys->search_save_row, ys->search_save_col,
+                _search_save_row, _search_save_col,
                 &row, &col,
                 1); /* TODO: use a direction when searching backwards */
     }
@@ -458,9 +593,7 @@ void find_fill_match_buff(char *buff, int size, char *str, regmatch_t match) {
 /*
  * Use regex for parsing a regex
  */
-int find_parse_replace_expression(matchframe *mf,
-                                  replace_properties *rp,
-                                  char *exp)
+int find_parse_sed_expression(matchframe *mf, char *exp)
 {
     /*
      * Matches into 6 groups:
@@ -473,21 +606,14 @@ int find_parse_replace_expression(matchframe *mf,
      */
     static const char *pattern = "([0-9]+|%)?,?([0-9]+)?s\\/(.*)\\/(.*)\\/(\\w+)?";
     static const size_t nmatches = 6;
+
+    replace_properties *rp;
     regmatch_t match[nmatches];
     regex_t regex;
     char buff[256];
     int status;
 
-    /* defaults for the find & replace properties */
-    rp->is_all_lines = 0;
-    rp->is_single_line = 0;
-    rp->is_global = 0;
-    rp->is_confirm = 0;
-    rp->is_ignore_case = 0;
-    rp->start_line = -1;
-    rp->end_line = -1;
-    rp->replacement = NULL;
-    rp->replacement_len = 0;
+    rp = find_replace_properties_reset();
 
     status = regcomp(&regex, pattern, REG_EXTENDED);
     if (status != 0) {
@@ -550,15 +676,14 @@ int find_parse_replace_expression(matchframe *mf,
      */
     find_fill_match_buff(buff, 256, exp, match[3]);
     if (buff[0] != '\0')
-        find_pattern_replace(buff);
+        find_array_replace(&_pattern, buff);
 
     /*
      * If the 4th pattern wasn't provided, then we will replace with nothing,
      * or remove the matches found from the buffer.
      */
     find_fill_match_buff(buff, 256, exp, match[4]);
-    rp->replacement = strdup(buff);
-    rp->replacement_len = match[4].rm_eo - match[4].rm_so;
+    array_push_n(rp->replacement, buff, (match[4].rm_eo - match[4].rm_so) + 1);
 
     /*
      * If the 5th match exists, then we need to match specific search options.
@@ -579,20 +704,35 @@ int find_parse_replace_expression(matchframe *mf,
     return 0;
 }
 
-void find_regex_replace(int n_args, char **args) {
-    replace_properties rp;
-    yed_frame         *frame;
-    yed_buffer        *buffer;
-    matchframe        *mf;
-    match             *m;
-    int                num_matches;
-	int				   status;
-    int                match_len;
-    int                offset;
-    int                last_line;
+/* So a find & replace using a sed expression */
+void find_regex_sed_replace(int n_args, char **args) {
+    yed_frame  *frame;
+    matchframe *mf;
 
     if (n_args == 0 || n_args > 1) {
         yed_cerr("Expected 1 argument, received %d", n_args);
+        return;
+    }
+    if (!ys->active_frame || !ys->active_frame->buffer)
+        return;
+    frame = ys->active_frame;
+
+    mf = find_matchframe_get_or_create(frame);
+    if (find_parse_sed_expression(mf, args[0]) != 0)
+        return;
+
+    find_matchframe_replace(mf);
+}
+
+/* Replace the current matches in the buffer with the given string */
+void find_regex_replace(int n_args, char **args) {
+    replace_properties *rp;
+    yed_frame          *frame;
+    matchframe         *mf;
+    int                 key;
+
+    if (!find_pattern_exists()) {
+        yed_cerr("No matches to replace!");
         return;
     }
 
@@ -601,57 +741,43 @@ void find_regex_replace(int n_args, char **args) {
     frame = ys->active_frame;
 
     mf = find_matchframe_get_or_create(frame);
-    if (find_parse_replace_expression(mf, &rp, args[0]) != 0)
-        return;
+    rp = find_replace_properties_get();
 
-    status = find_pattern_compile(rp.is_ignore_case);
-    if (status != 0) {
-        find_pattern_error(status);
-        return;
-    }
+    if (!ys->interactive_command) {
+        find_replace_properties_reset();
+        rp->is_global = 1;
 
-    /* TODO: search from start to end line, or specific lines */
-    num_matches = find_matchframe_search_in_buffer(mf, rp.is_global);
-    if (num_matches == 0) {
-        find_pattern_bad();
-        return;
-    }
+        if (n_args == 0) {
+            find_interactive_mode_start(0);
+            return;
+        }
 
-    last_line = -1;
-    offset = 0;
-    buffer = mf->yed_frame->buffer;
-    array_traverse(mf->matches, m) {
-        match_len = m->end - m->start;
+        find_array_replace(&rp->replacement, args[0]);
+        goto replace;
+    } else {
+        sscanf(args[0], "%d", &key);
+        switch (key) {
+            case ESC:
+            case CTRL_C:
+                find_interactive_mode_cancel();
+                return;
 
-        /*
-         * Matches are stored as offsets into the line, but we are deleting and
-         * inserting from that line which moves those offsets. We keep an
-         * offset for each match in a line. Every new line, we reset the
-         * offset.
-         */
-        if (last_line != m->line)
-            offset = 0;
-        last_line = m->line;
+            case ENTER:
+                find_interactive_mode_finish();
+                break;
 
-        /* delete the match one character at a time */
-        for (unsigned i = m->start; i < m->end; i++)
-            yed_delete_from_line(buffer, m->line, m->start + 1 + offset);
-
-        /* insert replacement one character at a time, in reverse */
-        if (rp.replacement[0] != '\0') {
-            for (int i = rp.replacement_len - 1; i >= 0; i--) {
-                yed_insert_into_line(buffer,
-                        m->line,
-                        m->start + 1 + offset,
-                        G(rp.replacement[i]));
-            }
-            offset += rp.replacement_len - match_len;
-        } else {
-            offset -= match_len;
+            default:
+                find_interactive_mode_build_array(&rp->replacement, key);
+                return;
         }
     }
 
-    find_matchframe_clear(mf);
+    /*
+     * We only make it here when interactive mode is finished, when building
+     * the replacement is done.
+     */
+replace:
+    find_matchframe_replace(mf);
 }
 
 void find_cursor_nearest_match(int n_args, char **args, int direction) {
@@ -688,55 +814,35 @@ void find_cursor_prev_match(int n_args, char **args) {
     find_cursor_nearest_match(n_args, args, -1);
 }
 
-void find_set_search_all_frames(int n_args, char **args) {
-    yed_cerr("TODO: Not implemented!");
-}
-
-void find_set_search_prompt(int n_args, char **args) {
-    if (n_args < 1) {
-        yed_cerr("Expected one argument.");
-        return;
-    }
-
-    free(_cmd_prompt);
-    _cmd_prompt = strdup(args[0]);
-}
-
 void find_unload(yed_plugin *self) {
-    yed_event_handler h;
     matchframe *mf;
-
-    /* replace the default search highlighter */
-    h.kind = EVENT_LINE_PRE_DRAW;
-    h.fn   = yed_search_line_handler;
-    yed_add_event_handler(h);
 
     array_traverse(_matchframes, mf) {
         array_free(mf->matches);
     }
     array_free(_matchframes);
     array_free(_pattern);
-
-    free(_cmd_prompt);
-
+    array_free(_search_hist);
+    array_free(_replace_properties.replacement);
+    free(_search_readline);
     regfree(&_regex);
 }
 
 int yed_plugin_boot(yed_plugin *self) {
+    yed_event_handler h;
+
     YED_PLUG_VERSION_CHECK();
 
     yed_plugin_set_unload_fn(self, find_unload);
-    _matchframes = array_make_with_cap(matchframe, FIND_DEFAULT_NUM_MATCHFRAMES);
-    _pattern = array_make_with_cap(char,  FIND_DEFAULT_PATTERN_LEN);
-    _cmd_prompt = strdup(FIND_DEFAULT_CMD_PROMPT);
 
-    /* remove default search highlighter */
-    yed_event_handler h;
-    h.kind = EVENT_LINE_PRE_DRAW;
-    h.fn   = yed_search_line_handler;
-    yed_delete_event_handler(h);
+    _matchframes = array_make_with_cap(matchframe, FIND_DEFAULT_ARRAY_LEN);
+    _pattern = array_make_with_cap(char, FIND_DEFAULT_ARRAY_LEN);
+    _replace_properties.replacement = array_make_with_cap(char, FIND_DEFAULT_ARRAY_LEN);
 
-    /* add our custom search highlighter */
+    _search_hist     = array_make(char*);
+    _search_readline = malloc(sizeof(*ys->search_readline));
+    yed_cmd_line_readline_make(_search_readline, &_search_hist);
+
     h.kind = EVENT_LINE_PRE_DRAW;
     h.fn   = find_matchframe_highlight_handler;
     yed_plugin_add_event_handler(self, h);
@@ -747,12 +853,24 @@ int yed_plugin_boot(yed_plugin *self) {
      * *any* search.
      */
 
-    yed_plugin_set_command(self, "find-in-buffer", find_regex_search);
-    yed_plugin_set_command(self, "find-and-replace", find_regex_replace);
-    yed_plugin_set_command(self, "find-next-in-buffer", find_cursor_next_match);
-    yed_plugin_set_command(self, "find-prev-in-buffer", find_cursor_prev_match);
-    yed_plugin_set_command(self, "find-set-search-all-frames", find_set_search_all_frames);
-    yed_plugin_set_command(self, "find-set-search-prompt", find_set_search_prompt);
+    if (!yed_get_var("find-regex-replace-default-commands"))
+        yed_set_var("find-regex-replace-default-commands", "false");
+
+    if (!yed_get_var("find-regex-search-prompt"))
+        yed_set_var("find-regex-search-prompt", FIND_DEFAULT_FIND_PROMPT);
+
+    if (!yed_get_var("find-regex-replace-prompt"))
+        yed_set_var("find-regex-replace-prompt", FIND_DEFAULT_REPLACE_PROMPT);
+
+    if (!yed_get_var("find-regex-search-all-frames"))
+        yed_set_var("find-regex-search-all-frames", "true");
+
+
+    yed_plugin_set_command(self, find_get_command(FIND_IN_BUFFER), find_regex_search);
+    yed_plugin_set_command(self, find_get_command(REPLACE_CURRENT_SEARCH), find_regex_replace);
+    yed_plugin_set_command(self, find_get_command(FIND_NEXT_IN_BUFFER), find_cursor_next_match);
+    yed_plugin_set_command(self, find_get_command(FIND_PREV_IN_BUFFER), find_cursor_prev_match);
+    yed_plugin_set_command(self, find_get_command(FIND_AND_REPLACE), find_regex_sed_replace);
 
     return 0;
 }
